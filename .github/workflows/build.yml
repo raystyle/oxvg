@@ -55,7 +55,11 @@ jobs:
       - name: 归位资产与边车
         shell: bash
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/oxvg/Cargo.toml | head -1)
+          # Tolerate CRLF checkouts and a trailing-comment; hard-fail on an
+          # empty extraction (e.g. version.workspace=true) so a broken asset
+          # name can never ship green (codex review G1).
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"\r*$/\1/p' crates/oxvg/Cargo.toml | head -1)
+          [ -n "$VERSION" ] || { echo "版本提取失败（crates/oxvg/Cargo.toml 无 version 字面量）"; exit 1; }
           if [ "${{ matrix.artifact }}" = "zip" ]; then
             ASSET="oxvg-${VERSION}-${{ matrix.target }}.zip"
             (cd "target/${{ matrix.target }}/release" && zip -q "$GITHUB_WORKSPACE/$ASSET" oxvg.exe)
@@ -74,12 +78,12 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-                   --title "$GITHUB_REF_NAME" --verify-tag
+              || { gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                   --title "$GITHUB_REF_NAME" --verify-tag 2>/dev/null || true; gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"; }
             gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release view dev --repo "$GITHUB_REPOSITORY" \
-              || gh release create dev --repo "$GITHUB_REPOSITORY" \
-                   --title dev --prerelease --target main
+              || { gh release create dev --repo "$GITHUB_REPOSITORY" \
+                   --title dev --prerelease --target main 2>/dev/null || true; gh release view dev --repo "$GITHUB_REPOSITORY"; }
             gh release upload dev "$ASSET" "$ASSET.sha256" --repo "$GITHUB_REPOSITORY" --clobber
           fi
