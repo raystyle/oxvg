@@ -1,0 +1,85 @@
+# oxvg 三平台构建与双通道发布（fork 分发链，蓝本 ark_rs/build.yml 语义）：
+# - push main：构建测试后资产滚动挂 pre-release tag `dev`；
+# - push v* tag：构建测试后资产挂正式 release（封版触发）。
+# - 资产名 oxvg-<版本>-<triple>（对齐 ohmycloud catalog [tools.oxvg] pin 名），
+#   每资产带 sha256 边车（sha256sum 原生格式：hex 空两格加名）。
+# - 分发镜像由 ohmycloud env-seed 从 release 拉（agent-svgtools 同款），
+#   本流水零 R2 secrets、零新密钥面。
+# - Windows 走 gnu 交叉（ubuntu 加 mingw-w64，摆脱 VC；PE 不可在 linux 跑，
+#   测试面由 linux/mac 双岗覆盖）。
+name: build
+
+on:
+  push:
+    branches:
+      - main
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            artifact: zip
+            apt: mingw-w64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: 装系统依赖
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: 构建
+        run: cargo build --release --locked --package oxvg --bin oxvg --target ${{ matrix.target }}
+      - name: 测试
+        # 交叉岗产物为 PE 不可在 linux 运行，跳过（测试面由 linux/mac 双岗覆盖）；
+        # 排除 napi/wasm/jsx 三包（JS 工具链面，同上游 rust.yml 口径）。
+        if: matrix.cross != true
+        run: cargo test --release --locked --workspace --exclude oxvg_jsx_napi --exclude oxvg_napi --exclude oxvg_wasm --target ${{ matrix.target }}
+      - name: 归位资产与边车
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/oxvg/Cargo.toml | head -1)
+          if [ "${{ matrix.artifact }}" = "zip" ]; then
+            ASSET="oxvg-${VERSION}-${{ matrix.target }}.zip"
+            (cd "target/${{ matrix.target }}/release" && zip -q "$GITHUB_WORKSPACE/$ASSET" oxvg.exe)
+          else
+            ASSET="oxvg-${VERSION}-${{ matrix.target }}.tar.gz"
+            tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" oxvg
+          fi
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          cat "$ASSET.sha256"
+      - name: 发布资产
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ env.ASSET }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                   --title "$GITHUB_REF_NAME" --verify-tag
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release view dev --repo "$GITHUB_REPOSITORY" \
+              || gh release create dev --repo "$GITHUB_REPOSITORY" \
+                   --title dev --prerelease --target main
+            gh release upload dev "$ASSET" "$ASSET.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          fi
